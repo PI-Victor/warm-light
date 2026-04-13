@@ -1,0 +1,18 @@
+[workspace]
+members = [".", "crates/shared", "src-tauri"]
+resolver = "2"
+
+[package]
+name = "warmlight-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+console_error_panic_hook = "0.1.7"
+leptos = { version = "0.8.17", features = ["csr"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde-wasm-bindgen = "0.6.5"
+shared = { path = "crates/shared" }
+wasm-bindgen = "0.2.105"
+wasm-bindgen-futures = "0.4.55"
+web-sys = { version = "0.3.82", features = ["HtmlInputElement", "HtmlSelectElement"] }
