@@ -32,6 +32,8 @@ struct SurfaceFoldState {
     input_source: RwSignal<bool>,
     display_mode: RwSignal<bool>,
     audio: RwSignal<bool>,
+    osd: RwSignal<bool>,
+    restore: RwSignal<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -108,6 +110,8 @@ pub fn App() -> impl IntoView {
         input_source: RwSignal::new(false),
         display_mode: RwSignal::new(false),
         audio: RwSignal::new(false),
+        osd: RwSignal::new(false),
+        restore: RwSignal::new(false),
     };
 
     let refresh = move || {
@@ -327,11 +331,25 @@ fn MonitorStage(
     let volume_control = find_control(&monitor.controls, "62");
     let input_source_control = find_control(&monitor.controls, "60");
     let display_mode_control = find_control(&monitor.controls, "DC");
+    let osd_controls: Vec<_> = monitor
+        .controls
+        .iter()
+        .filter(|control| matches!(control.code.as_str(), "02" | "CA" | "CC"))
+        .cloned()
+        .collect();
+    let action_controls: Vec<_> = monitor
+        .controls
+        .iter()
+        .filter(|control| matches!(control.code.as_str(), "04" | "05" | "08" | "B0"))
+        .cloned()
+        .collect();
     let mute_control_for_view = StoredValue::new(mute_control.clone());
     let power_control_for_view = StoredValue::new(power_control.clone());
     let volume_control_for_view = StoredValue::new(volume_control.clone());
     let input_source_control_for_view = StoredValue::new(input_source_control.clone());
     let display_mode_control_for_view = StoredValue::new(display_mode_control.clone());
+    let osd_controls_for_view = StoredValue::new(osd_controls.clone());
+    let action_controls_for_view = StoredValue::new(action_controls.clone());
     let gain_controls: Vec<_> = monitor
         .controls
         .iter()
@@ -360,7 +378,11 @@ fn MonitorStage(
         .manufacturer_id
         .clone()
         .unwrap_or_else(|| String::from("Unknown"));
-    let readable_control_count = monitor.controls.len();
+    let readable_control_count = monitor
+        .controls
+        .iter()
+        .filter(|control| control.supported)
+        .count();
 
     view! {
         <div class="studio-plane">
@@ -563,6 +585,32 @@ fn MonitorStage(
                                             </div>
                                         </Show>
                                     </div>
+                                </div>
+                            </Show>
+
+                            <Show when=move || !osd_controls_for_view.get_value().is_empty()>
+                                <div class="surface-inline surface-secondary-controls">
+                                    <OsdControlSection
+                                        monitor_id=monitor_id_surface_controls.get_value()
+                                        monitors
+                                        controls=osd_controls_for_view.get_value()
+                                        is_busy
+                                        local_error
+                                        is_open=surface_folds.osd
+                                    />
+                                </div>
+                            </Show>
+
+                            <Show when=move || !action_controls_for_view.get_value().is_empty()>
+                                <div class="surface-inline surface-secondary-controls">
+                                    <ActionControlSection
+                                        monitor_id=monitor_id_surface_controls.get_value()
+                                        monitors
+                                        controls=action_controls_for_view.get_value()
+                                        is_busy
+                                        local_error
+                                        is_open=surface_folds.restore
+                                    />
                                 </div>
                             </Show>
                         </div>
@@ -959,6 +1007,285 @@ fn AudioControlSection(
                 </Show>
             </div>
         </details>
+    }
+}
+
+#[component]
+fn OsdControlSection(
+    monitor_id: String,
+    monitors: RwSignal<Vec<MonitorSnapshot>>,
+    controls: Vec<MonitorControl>,
+    is_busy: RwSignal<bool>,
+    local_error: RwSignal<String>,
+    is_open: RwSignal<bool>,
+) -> impl IntoView {
+    let controls_for_view = StoredValue::new(controls);
+
+    view! {
+        <details
+            class="surface-fold"
+            prop:open=move || is_open.get()
+            on:toggle=move |event: Event| {
+                is_open.set(event_target::<HtmlDetailsElement>(&event).open());
+            }
+        >
+            <summary class="surface-fold-summary">
+                <div>
+                    <p class="panel-label">"OSD"</p>
+                    <strong class="panel-value surface-fold-value">
+                        "Buttons, language, and saved-state flags"
+                    </strong>
+                </div>
+            </summary>
+
+            <div class="surface-fold-body action-list surface-action-list">
+                <For
+                    each=move || controls_for_view.get_value()
+                    key=|control| control.code.clone()
+                    children=move |control| {
+                        view! {
+                            <SurfaceChoiceRow
+                                monitor_id=monitor_id.clone()
+                                monitors
+                                control
+                                is_busy
+                                local_error
+                            />
+                        }
+                    }
+                />
+            </div>
+        </details>
+    }
+}
+
+#[component]
+fn SurfaceChoiceRow(
+    monitor_id: String,
+    monitors: RwSignal<Vec<MonitorSnapshot>>,
+    control: MonitorControl,
+    is_busy: RwSignal<bool>,
+    local_error: RwSignal<String>,
+) -> impl IntoView {
+    let selected_value = RwSignal::new(control.current_value.unwrap_or_default());
+    let control_code = control.code.clone();
+    let control_label = control.label.clone();
+    let control_heading_label = control.label.clone();
+    let control_supported = control.supported;
+    let control_error = control.error.clone();
+    let control_label_for_warning = control_label.clone();
+    let options = control.options.clone();
+    let options_for_label = StoredValue::new(options.clone());
+
+    view! {
+        <section class="action-row surface-choice-row">
+            <div class="action-main">
+                <div class="action-copy">
+                    <p class="panel-label">{control_heading_label.clone()}</p>
+                    <strong class="panel-value">
+                        {move || {
+                            if control_supported {
+                                option_label(&options_for_label.get_value(), selected_value.get())
+                            } else {
+                                String::from("Unavailable")
+                            }
+                        }}
+                    </strong>
+                </div>
+            </div>
+
+            <div class="choice-strip preset-choice-strip" role="group" aria-label=control_heading_label.clone()>
+                <For
+                    each=move || options.clone()
+                    key=|option| option.value
+                    children=move |option| {
+                        let option_value = option.value;
+                        let option_label_text = option.label.clone();
+                        let monitor_id = monitor_id.clone();
+                        let control_code = control_code.clone();
+                        let control_label = control_label.clone();
+
+                        view! {
+                            <button
+                                class=move || {
+                                    if selected_value.get() == option_value {
+                                        "choice-segment active"
+                                    } else {
+                                        "choice-segment"
+                                    }
+                                }
+                                type="button"
+                                disabled=move || !control_supported || is_busy.get()
+                                on:click=move |_| {
+                                    if selected_value.get_untracked() == option_value {
+                                        return;
+                                    }
+
+                                    selected_value.set(option_value);
+                                    is_busy.set(true);
+                                    local_error.set(String::new());
+
+                                    let monitor_id = monitor_id.clone();
+                                    let control_code = control_code.clone();
+                                    let control_label = control_label.clone();
+
+                                    spawn_local(async move {
+                                        match interop::set_feature(&monitor_id, &control_code, option_value).await {
+                                            Ok(updated) => replace_monitor_snapshot(monitors, updated),
+                                            Err(error) => local_error.set(format!("{control_label}: {error}")),
+                                        }
+
+                                        is_busy.set(false);
+                                    });
+                                }
+                            >
+                                {option_label_text}
+                            </button>
+                        }
+                    }
+                />
+            </div>
+
+            <Show when=move || !control_supported>
+                <p class="support-note warning">
+                    {control_error
+                        .clone()
+                        .unwrap_or_else(|| format!("{control_label_for_warning} is unavailable."))}
+                </p>
+            </Show>
+        </section>
+    }
+}
+
+#[component]
+fn ActionControlSection(
+    monitor_id: String,
+    monitors: RwSignal<Vec<MonitorSnapshot>>,
+    controls: Vec<MonitorControl>,
+    is_busy: RwSignal<bool>,
+    local_error: RwSignal<String>,
+    is_open: RwSignal<bool>,
+) -> impl IntoView {
+    let controls_for_view = StoredValue::new(controls);
+
+    view! {
+        <details
+            class="surface-fold"
+            prop:open=move || is_open.get()
+            on:toggle=move |event: Event| {
+                is_open.set(event_target::<HtmlDetailsElement>(&event).open());
+            }
+        >
+            <summary class="surface-fold-summary">
+                <div>
+                    <p class="panel-label">"Restore & Store"</p>
+                    <strong class="panel-value surface-fold-value">
+                        "Reset defaults or store the current mode"
+                    </strong>
+                </div>
+            </summary>
+
+            <div class="surface-fold-body action-list surface-action-list">
+                <For
+                    each=move || controls_for_view.get_value()
+                    key=|control| control.code.clone()
+                    children=move |control| {
+                        view! {
+                            <SurfaceActionRow
+                                monitor_id=monitor_id.clone()
+                                monitors
+                                control
+                                is_busy
+                                local_error
+                            />
+                        }
+                    }
+                />
+            </div>
+        </details>
+    }
+}
+
+#[component]
+fn SurfaceActionRow(
+    monitor_id: String,
+    monitors: RwSignal<Vec<MonitorSnapshot>>,
+    control: MonitorControl,
+    is_busy: RwSignal<bool>,
+    local_error: RwSignal<String>,
+) -> impl IntoView {
+    let control_code = control.code.clone();
+    let control_code_for_key = control.code.clone();
+    let control_label = control.label.clone();
+    let control_label_for_warning = control_label.clone();
+    let options = control.options.clone();
+    let supported = control.supported;
+    let error = control.error.clone();
+
+    view! {
+        <section class="action-row surface-choice-row">
+            <div class="action-main">
+                <div class="action-copy">
+                    <p class="panel-label">{control.label.clone()}</p>
+                    <strong class="panel-value">
+                        {if supported {
+                            String::from("Available")
+                        } else {
+                            String::from("Unavailable")
+                        }}
+                    </strong>
+                </div>
+            </div>
+
+            <div class="choice-strip preset-choice-strip" role="group" aria-label=control.label.clone()>
+                <For
+                    each=move || options.clone()
+                    key=move |option| format!("{}-{}", control_code_for_key, option.value)
+                    children=move |option| {
+                        let option_value = option.value;
+                        let option_label_text = option.label.clone();
+                        let monitor_id = monitor_id.clone();
+                        let control_code = control_code.clone();
+                        let control_label = control_label.clone();
+
+                        view! {
+                            <button
+                                class="choice-segment"
+                                type="button"
+                                disabled=move || !supported || is_busy.get()
+                                on:click=move |_| {
+                                    is_busy.set(true);
+                                    local_error.set(String::new());
+
+                                    let monitor_id = monitor_id.clone();
+                                    let control_code = control_code.clone();
+                                    let control_label = control_label.clone();
+
+                                    spawn_local(async move {
+                                        match interop::set_feature(&monitor_id, &control_code, option_value).await {
+                                            Ok(updated) => replace_monitor_snapshot(monitors, updated),
+                                            Err(error) => local_error.set(format!("{control_label}: {error}")),
+                                        }
+
+                                        is_busy.set(false);
+                                    });
+                                }
+                            >
+                                {option_label_text}
+                            </button>
+                        }
+                    }
+                />
+            </div>
+
+            <Show when=move || !supported>
+                <p class="support-note warning">
+                    {error
+                        .clone()
+                        .unwrap_or_else(|| format!("{control_label_for_warning} is unavailable."))}
+                </p>
+            </Show>
+        </section>
     }
 }
 
@@ -1618,8 +1945,12 @@ fn power_mode_option(options: &[ControlOption], want_on: bool) -> Option<Control
     } else {
         options
             .iter()
-            .find(|option| option.value == 0x04)
+            .find(|option| option.value == 0x05)
             .cloned()
+            .or_else(|| options
+                .iter()
+            .find(|option| option.value == 0x04)
+            .cloned())
             .or_else(|| options.iter().find(|option| option.value != 0x01).cloned())
     }
 }

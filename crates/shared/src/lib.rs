@@ -46,6 +46,7 @@ pub enum MonitorControlType {
     Range,
     Choice,
     Toggle,
+    Action,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

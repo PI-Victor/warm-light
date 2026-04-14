@@ -15,6 +15,7 @@ mod imp {
         Range,
         Choice,
         Toggle,
+        Action,
     }
 
     #[derive(Clone, Copy)]
@@ -56,6 +57,11 @@ mod imp {
     }
 
     const FEATURE_DEFINITIONS: &[FeatureDefinition] = &[
+        FeatureDefinition {
+            code: "02",
+            label: "New Control Value",
+            kind: FeatureKind::Choice,
+        },
         FeatureDefinition {
             code: "10",
             label: "Brightness",
@@ -107,9 +113,39 @@ mod imp {
             kind: FeatureKind::Toggle,
         },
         FeatureDefinition {
+            code: "CA",
+            label: "OSD",
+            kind: FeatureKind::Choice,
+        },
+        FeatureDefinition {
+            code: "CC",
+            label: "OSD Language",
+            kind: FeatureKind::Choice,
+        },
+        FeatureDefinition {
             code: "D6",
-            label: "Display Power",
+            label: "Power Mode",
             kind: FeatureKind::Toggle,
+        },
+        FeatureDefinition {
+            code: "04",
+            label: "Restore Factory Defaults",
+            kind: FeatureKind::Action,
+        },
+        FeatureDefinition {
+            code: "05",
+            label: "Restore Brightness / Contrast",
+            kind: FeatureKind::Action,
+        },
+        FeatureDefinition {
+            code: "08",
+            label: "Restore Color Defaults",
+            kind: FeatureKind::Action,
+        },
+        FeatureDefinition {
+            code: "B0",
+            label: "Stored Settings",
+            kind: FeatureKind::Action,
         },
     ];
 
@@ -131,7 +167,7 @@ mod imp {
     ) -> Result<MonitorSnapshot> {
         let monitor = find_monitor(monitor_id)?;
         set_feature_value(&monitor, code, value)?;
-        if code.eq_ignore_ascii_case("14") {
+        if matches!(code.to_ascii_uppercase().as_str(), "14" | "04" | "05" | "08" | "B0") {
             thread::sleep(Duration::from_millis(220));
         }
         Ok(snapshot_for_monitor(&monitor))
@@ -205,6 +241,15 @@ mod imp {
                 .as_ref()
                 .and_then(|entries| entries.get(definition.code));
 
+            if matches!(definition.kind, FeatureKind::Action) {
+                controls.push(action_control_snapshot(
+                    definition,
+                    capability,
+                    capabilities.is_some(),
+                ));
+                continue;
+            }
+
             match read_feature(monitor, definition.code) {
                 Ok(readout) => {
                     let label = capability
@@ -214,11 +259,7 @@ mod imp {
                     controls.push(MonitorControl {
                         code: definition.code.to_string(),
                         label,
-                        control_type: match definition.kind {
-                            FeatureKind::Range => MonitorControlType::Range,
-                            FeatureKind::Choice => MonitorControlType::Choice,
-                            FeatureKind::Toggle => MonitorControlType::Toggle,
-                        },
+                        control_type: control_type_for_kind(definition.kind),
                         current_value: Some(readout.current_value),
                         max_value: readout.max_value,
                         options: resolved_options(definition, capability),
@@ -230,11 +271,7 @@ mod imp {
                     controls.push(MonitorControl {
                         code: definition.code.to_string(),
                         label: definition.label.to_string(),
-                        control_type: match definition.kind {
-                            FeatureKind::Range => MonitorControlType::Range,
-                            FeatureKind::Choice => MonitorControlType::Choice,
-                            FeatureKind::Toggle => MonitorControlType::Toggle,
-                        },
+                        control_type: control_type_for_kind(definition.kind),
                         current_value: None,
                         max_value: None,
                         options: resolved_options(definition, capability),
@@ -358,6 +395,50 @@ mod imp {
             .find(|definition| definition.code.eq_ignore_ascii_case(code))
     }
 
+    fn control_type_for_kind(kind: FeatureKind) -> MonitorControlType {
+        match kind {
+            FeatureKind::Range => MonitorControlType::Range,
+            FeatureKind::Choice => MonitorControlType::Choice,
+            FeatureKind::Toggle => MonitorControlType::Toggle,
+            FeatureKind::Action => MonitorControlType::Action,
+        }
+    }
+
+    fn action_control_snapshot(
+        definition: &FeatureDefinition,
+        capability: Option<&CapabilityFeature>,
+        capabilities_available: bool,
+    ) -> MonitorControl {
+        let supported = capability.is_some();
+        let label = capability
+            .and_then(|feature| feature.label.clone())
+            .unwrap_or_else(|| definition.label.to_string());
+        let error = if supported {
+            None
+        } else if capabilities_available {
+            Some(format!(
+                "{} is not reported in the monitor capabilities.",
+                definition.label
+            ))
+        } else {
+            Some(format!(
+                "{} could not be verified because the monitor capabilities were unavailable.",
+                definition.label
+            ))
+        };
+
+        MonitorControl {
+            code: definition.code.to_string(),
+            label,
+            control_type: MonitorControlType::Action,
+            current_value: None,
+            max_value: None,
+            options: resolved_options(definition, capability),
+            supported,
+            error,
+        }
+    }
+
     fn color_scene_profile(scene_id: &str) -> Option<ColorSceneProfile> {
         match scene_id {
             "paper" => Some(ColorSceneProfile {
@@ -415,6 +496,16 @@ mod imp {
         }
 
         match definition.code {
+            "02" => vec![
+                ControlOption {
+                    value: 0x01,
+                    label: String::from("No changes"),
+                },
+                ControlOption {
+                    value: 0x02,
+                    label: String::from("Some values changed"),
+                },
+            ],
             "8D" => vec![
                 ControlOption {
                     value: 0x02,
@@ -427,12 +518,86 @@ mod imp {
             ],
             "D6" => vec![
                 ControlOption {
+                    value: 0x01,
+                    label: String::from("On"),
+                },
+                ControlOption {
+                    value: 0x02,
+                    label: String::from("Standby"),
+                },
+                ControlOption {
+                    value: 0x03,
+                    label: String::from("Suspend"),
+                },
+                ControlOption {
                     value: 0x04,
                     label: String::from("Off"),
                 },
                 ControlOption {
+                    value: 0x05,
+                    label: String::from("Turn Off"),
+                },
+            ],
+            "CA" => vec![
+                ControlOption {
                     value: 0x01,
-                    label: String::from("On"),
+                    label: String::from("Disabled"),
+                },
+                ControlOption {
+                    value: 0x02,
+                    label: String::from("Enabled"),
+                },
+            ],
+            "CC" => vec![
+                ControlOption {
+                    value: 0x02,
+                    label: String::from("English"),
+                },
+                ControlOption {
+                    value: 0x03,
+                    label: String::from("French"),
+                },
+                ControlOption {
+                    value: 0x04,
+                    label: String::from("German"),
+                },
+                ControlOption {
+                    value: 0x05,
+                    label: String::from("Italian"),
+                },
+                ControlOption {
+                    value: 0x09,
+                    label: String::from("Russian"),
+                },
+                ControlOption {
+                    value: 0x0A,
+                    label: String::from("Spanish"),
+                },
+                ControlOption {
+                    value: 0x0B,
+                    label: String::from("Swedish"),
+                },
+            ],
+            "04" => vec![ControlOption {
+                value: 0x01,
+                label: String::from("Restore Factory Defaults"),
+            }],
+            "05" => vec![ControlOption {
+                value: 0x01,
+                label: String::from("Restore Brightness and Contrast"),
+            }],
+            "08" => vec![ControlOption {
+                value: 0x01,
+                label: String::from("Restore Color Defaults"),
+            }],
+            "B0" => vec![
+                ControlOption {
+                    value: 0x01,
+                    label: String::from("Store Current Settings"),
+                },
+                ControlOption {
+                    value: 0x02,
+                    label: String::from("Restore Current Mode"),
                 },
             ],
             _ => Vec::new(),
