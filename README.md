@@ -1,6 +1,6 @@
-# WarmLight
+# WarmLite
 
-WarmLight is a desktop controller for external monitors that support DDC/CI. It gives you direct control over brightness, contrast, presets, input selection, power, and a small set of warm color scenes from a native desktop UI.
+WarmLite is a desktop controller for external monitors that support DDC/CI. It gives you direct control over brightness, contrast, presets, input selection, power, and a small set of warm color scenes from a native desktop UI.
 
 The current implementation is a Tauri app with a Leptos frontend. On Linux it talks to monitors through `ddcutil`. On non-Linux platforms the fallback backend currently supports brightness only.
 
@@ -29,7 +29,7 @@ The current implementation is a Tauri app with a Leptos frontend. On Linux it ta
   - `Candle`
   - `Nocturne`
 
-WarmLight only shows and enables controls that a given monitor actually reports through DDC/CI. Unsupported controls remain visible with an error message so you can see what the app tried to probe.
+WarmLite only shows and enables controls that a given monitor actually reports through DDC/CI. Unsupported controls remain visible with an error message so you can see what the app tried to probe.
 
 ## Platform Support
 

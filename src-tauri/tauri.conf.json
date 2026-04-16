@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "WarmLight",
+  "productName": "WarmLite",
   "version": "0.1.0",
-  "identifier": "dev.warmlight.app",
+  "identifier": "io.cloudflavor.warmlite",
   "build": {
     "beforeBuildCommand": "trunk build",
     "beforeDevCommand": "trunk serve --address 127.0.0.1 --port 1420",
@@ -17,7 +17,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "WarmLight",
+        "title": "WarmLite",
         "width": 1180,
         "height": 840,
         "minWidth": 920,
