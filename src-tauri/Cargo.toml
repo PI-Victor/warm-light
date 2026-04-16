@@ -1,5 +1,5 @@
 [package]
-name = "warmlight"
+name = "warmlite"
 version = "0.1.0"
 edition = "2024"
 
@@ -12,3 +12,5 @@ ddc-hi = "0.4.1"
 serde = { version = "1.0.228", features = ["derive"] }
 shared = { path = "../crates/shared" }
 tauri = { version = "2.10.3", features = [] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }

@@ -1,3 +1,3 @@
 fn main() {
-    warmlight::run();
+    warmlite::run();
 }

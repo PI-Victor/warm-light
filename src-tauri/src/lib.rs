@@ -1,7 +1,10 @@
 mod commands;
+mod logging;
 mod monitor;
 
 pub fn run() {
+    logging::init_tracing();
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             commands::list_monitors,
@@ -10,5 +13,5 @@ pub fn run() {
             commands::apply_color_scene
         ])
         .run(tauri::generate_context!())
-        .expect("error while running WarmLight");
+        .expect("error while running WarmLite");
 }
