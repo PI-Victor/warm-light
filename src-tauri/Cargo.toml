@@ -2,6 +2,7 @@
 name = "warmlite"
 version = "0.1.0"
 edition = "2024"
+default-run = "warmlite"
 
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }
