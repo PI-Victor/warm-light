@@ -2,3 +2,4 @@ target/
 dist/
 .ddc-probes/
 .codex
+.parley
