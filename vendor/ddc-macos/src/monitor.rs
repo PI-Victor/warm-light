@@ -304,7 +304,7 @@ impl DdcCommandRaw for Monitor {
         response_delay: Duration,
     ) -> Result<&'a mut [u8], Self::Error> {
         assert!(data.len() <= 36);
-        let response_delay = response_delay.max(Duration::from_millis(80));
+        let response_delay = response_delay.max(Duration::from_millis(120));
         let mut packet = [0u8; 36 + 3];
         let packet = self.encode_command(data, &mut packet);
         if out.is_empty() {
@@ -317,27 +317,63 @@ impl DdcCommandRaw for Monitor {
             return self.decode_response(response);
         }
 
-        // Some adapters return an extra status byte and need larger read buffers
-        // than the command-specific DDC MAX_LEN+3 allocation.
-        let mut raw_response_buffer = [0u8; 64];
-        let response = match &self.service {
-            MonitorService::Intel(service) => {
-                intel::execute(service, self.i2c_address, packet, &mut raw_response_buffer, response_delay)
+        // Some adapters return extra status/padding bytes and need larger buffers.
+        let mut raw_response_buffer = [0u8; 128];
+        let is_get_vcp = data.len() >= 2 && data[0] == 0x01;
+        let mut last_error: Option<crate::error::Error> = None;
+
+        // Get VCP reads are retried once with a slower response delay because some
+        // monitors return truncated replies on the first read window.
+        for extra_delay_ms in [0_u64, 100_u64] {
+            if extra_delay_ms > 0 && !is_get_vcp {
+                continue;
             }
-            MonitorService::Arm(service) => {
-                arm::execute(service, self.i2c_address, packet, &mut raw_response_buffer, response_delay)
+            let attempt_delay = response_delay + Duration::from_millis(extra_delay_ms);
+            let response = match &self.service {
+                MonitorService::Intel(service) => {
+                    intel::execute(service, self.i2c_address, packet, &mut raw_response_buffer, attempt_delay)
+                }
+                MonitorService::Arm(service) => {
+                    arm::execute(service, self.i2c_address, packet, &mut raw_response_buffer, attempt_delay)
+                }
+            }?;
+
+            if let Some(payload) = self.extract_get_vcp_payload_from_raw(data, response) {
+                let copy_len = payload.len().min(out.len());
+                out[..copy_len].copy_from_slice(&payload[..copy_len]);
+                return Ok(&mut out[..copy_len]);
             }
-        }?;
-        if let Some(payload) = self.extract_get_vcp_payload_from_raw(data, response) {
-            let copy_len = payload.len().min(out.len());
-            out[..copy_len].copy_from_slice(&payload[..copy_len]);
+
+            let decoded = match self.decode_response(response) {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+            let normalized = normalize_get_vcp_payload(data, decoded);
+
+            if is_get_vcp {
+                if normalized.len() < 8 {
+                    continue;
+                }
+                out[..8].copy_from_slice(&normalized[..8]);
+                return Ok(&mut out[..8]);
+            }
+
+            let copy_len = normalized.len().min(out.len());
+            out[..copy_len].copy_from_slice(&normalized[..copy_len]);
             return Ok(&mut out[..copy_len]);
         }
-        let response = self.decode_response(response)?;
-        let response = normalize_get_vcp_payload(data, response);
-        let copy_len = response.len().min(out.len());
-        out[..copy_len].copy_from_slice(&response[..copy_len]);
-        Ok(&mut out[..copy_len])
+
+        if let Some(error) = last_error {
+            return Err(error);
+        }
+
+        // No parseable frame came back after retries.
+        Err(Error::Ddc(ErrorCode::Invalid(String::from(
+            "Unable to parse DDC/CI response payload",
+        ))))
     }
 }
 

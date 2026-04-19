@@ -98,11 +98,6 @@ mod imp {
             kind: FeatureKind::Range,
         },
         FeatureDefinition {
-            code: "60",
-            label: "Input Source",
-            kind: FeatureKind::Choice,
-        },
-        FeatureDefinition {
             code: "DC",
             label: "Display Mode",
             kind: FeatureKind::Choice,
@@ -148,6 +143,9 @@ mod imp {
             kind: FeatureKind::Action,
         },
     ];
+    const RANGE_TARGET_STEP_SIZE: u16 = 2;
+    const RANGE_MAX_TRANSITION_WRITES: u16 = 24;
+    const COLOR_SCENE_GAIN_STEP_DELAY_MS: u64 = 18;
 
     pub fn list_monitors() -> Result<Vec<MonitorSnapshot>> {
         let monitors = detect_monitors()?;
@@ -167,6 +165,9 @@ mod imp {
     ) -> Result<MonitorSnapshot> {
         let monitor = find_monitor(monitor_id)?;
         let normalized_code = code.to_ascii_uppercase();
+        if normalized_code == "60" {
+            bail!("Input source control is disabled in this app");
+        }
         if is_rgb_gain_code(normalized_code.as_str()) {
             if set_feature_value(&monitor, "14", 0x0b).is_ok() {
                 thread::sleep(Duration::from_millis(140));
@@ -187,6 +188,9 @@ mod imp {
     ) -> Result<MonitorSnapshot> {
         let monitor = find_monitor(monitor_id)?;
         let normalized_code = code.to_ascii_uppercase();
+        if normalized_code == "60" {
+            bail!("Input source control is disabled in this app");
+        }
         if is_rgb_gain_code(normalized_code.as_str()) {
             if set_feature_value(&monitor, "14", 0x0b).is_ok() {
                 thread::sleep(Duration::from_millis(140));
@@ -208,15 +212,17 @@ mod imp {
             return Ok(snapshot_for_monitor(&monitor));
         }
 
-        if current.current_value < target {
-            for next in (current.current_value + 1)..=target {
-                set_feature_value(&monitor, code, next)?;
-                thread::sleep(Duration::from_millis(step_delay_ms));
-            }
-        } else {
-            for next in (target..current.current_value).rev() {
-                set_feature_value(&monitor, code, next)?;
-                thread::sleep(Duration::from_millis(step_delay_ms));
+        let sequence = build_transition_sequence(
+            current.current_value,
+            target,
+            RANGE_TARGET_STEP_SIZE,
+            RANGE_MAX_TRANSITION_WRITES,
+        );
+        let delay = Duration::from_millis(step_delay_ms);
+        for (index, next) in sequence.iter().enumerate() {
+            set_feature_value(&monitor, code, *next)?;
+            if index + 1 < sequence.len() {
+                thread::sleep(delay);
             }
         }
 
@@ -230,9 +236,24 @@ mod imp {
 
         set_feature_value(&monitor, "14", 0x0b)?;
         thread::sleep(Duration::from_millis(140));
-        apply_rgb_gain_percent(&monitor, "16", profile.red_percent)?;
-        apply_rgb_gain_percent(&monitor, "18", profile.green_percent)?;
-        apply_rgb_gain_percent(&monitor, "1A", profile.blue_percent)?;
+        apply_rgb_gain_percent(
+            &monitor,
+            "16",
+            profile.red_percent,
+            COLOR_SCENE_GAIN_STEP_DELAY_MS,
+        )?;
+        apply_rgb_gain_percent(
+            &monitor,
+            "18",
+            profile.green_percent,
+            COLOR_SCENE_GAIN_STEP_DELAY_MS,
+        )?;
+        apply_rgb_gain_percent(
+            &monitor,
+            "1A",
+            profile.blue_percent,
+            COLOR_SCENE_GAIN_STEP_DELAY_MS,
+        )?;
 
         Ok(snapshot_for_monitor(&monitor))
     }
@@ -458,45 +479,111 @@ mod imp {
     fn color_scene_profile(scene_id: &str) -> Option<ColorSceneProfile> {
         match scene_id {
             "paper" => Some(ColorSceneProfile {
-                red_percent: 100,
-                green_percent: 90,
-                blue_percent: 76,
+                red_percent: 94,
+                green_percent: 92,
+                blue_percent: 88,
             }),
             "sunset" => Some(ColorSceneProfile {
                 red_percent: 100,
-                green_percent: 82,
-                blue_percent: 62,
+                green_percent: 72,
+                blue_percent: 46,
             }),
             "ember" => Some(ColorSceneProfile {
                 red_percent: 100,
-                green_percent: 72,
-                blue_percent: 48,
+                green_percent: 62,
+                blue_percent: 32,
             }),
             "incandescent" => Some(ColorSceneProfile {
-                red_percent: 100,
-                green_percent: 78,
-                blue_percent: 55,
-            }),
-            "candle" => Some(ColorSceneProfile {
-                red_percent: 100,
-                green_percent: 66,
+                red_percent: 96,
+                green_percent: 68,
                 blue_percent: 38,
             }),
+            "candle" => Some(ColorSceneProfile {
+                red_percent: 92,
+                green_percent: 56,
+                blue_percent: 24,
+            }),
             "nocturne" => Some(ColorSceneProfile {
-                red_percent: 100,
-                green_percent: 58,
-                blue_percent: 28,
+                red_percent: 84,
+                green_percent: 46,
+                blue_percent: 14,
             }),
             _ => None,
         }
     }
 
-    fn apply_rgb_gain_percent(monitor: &LinuxMonitor, code: &str, percent: u8) -> Result<()> {
+    fn apply_rgb_gain_percent(
+        monitor: &LinuxMonitor,
+        code: &str,
+        percent: u8,
+        step_delay_ms: u64,
+    ) -> Result<()> {
         let readout = read_feature(monitor, code)?;
         let maximum = readout.max_value.unwrap_or(100).max(1);
         let clamped = percent.min(100) as u32;
         let target = (((maximum as u32) * clamped) + 50) / 100;
-        set_feature_value(monitor, code, target.min(maximum as u32) as u16)
+        let target = target.min(maximum as u32) as u16;
+        let current = readout.current_value.min(maximum);
+        if current == target {
+            return Ok(());
+        }
+
+        let sequence = build_transition_sequence(
+            current,
+            target,
+            RANGE_TARGET_STEP_SIZE,
+            RANGE_MAX_TRANSITION_WRITES,
+        );
+        let delay = Duration::from_millis(step_delay_ms);
+        for (index, next) in sequence.iter().enumerate() {
+            set_feature_value(monitor, code, *next)?;
+            if index + 1 < sequence.len() {
+                thread::sleep(delay);
+            }
+        }
+        Ok(())
+    }
+
+    fn build_transition_sequence(
+        current: u16,
+        target: u16,
+        target_step_size: u16,
+        max_writes: u16,
+    ) -> Vec<u16> {
+        if current == target {
+            return Vec::new();
+        }
+
+        let distance = current.abs_diff(target);
+        let desired_writes = ((distance + target_step_size.saturating_sub(1))
+            / target_step_size.max(1))
+        .max(1);
+        let writes = desired_writes.min(max_writes.max(1)).min(distance).max(1);
+        let mut sequence = Vec::with_capacity(writes as usize);
+        let ascending = target > current;
+        let mut last = current;
+        let total = u32::from(distance);
+        let writes_u32 = u32::from(writes);
+
+        for step in 1..=writes_u32 {
+            let progressed = ((total * step) + (writes_u32 / 2)) / writes_u32;
+            let progressed = progressed.min(total) as u16;
+            let next = if ascending {
+                current.saturating_add(progressed).min(target)
+            } else {
+                current.saturating_sub(progressed).max(target)
+            };
+            if next != last {
+                sequence.push(next);
+                last = next;
+            }
+        }
+
+        if sequence.last().copied() != Some(target) {
+            sequence.push(target);
+        }
+
+        sequence
     }
 
     fn resolved_options(
@@ -941,11 +1028,14 @@ mod imp {
     const LUMINANCE_CODE: u8 = 0x10;
     const BRIGHTNESS_CODE: &str = "10";
     const COLOR_PRESET_CODE: &str = "14";
+    const INPUT_SOURCE_CODE: &str = "60";
     const COLOR_PRESET_USER_1_VALUE: u16 = 0x0B;
     const RED_GAIN_CODE: &str = "16";
     const GREEN_GAIN_CODE: &str = "18";
     const BLUE_GAIN_CODE: &str = "1A";
     const COLOR_PRESET_SETTLE_MS: u64 = 140;
+    const COLOR_SCENE_GAIN_STEP_DELAY_MS: u64 = 18;
+    const INPUT_SOURCE_SETTLE_MS: u64 = 180;
     const DDC_MONITOR_PREFIX: &str = "ddc:";
     const BRIGHTNESS_KEY: &str = "brightness";
     const DISPLAY_CONNECT_CLASS_NAME: &str = "IODisplayConnect";
@@ -980,10 +1070,14 @@ mod imp {
     const DDC_WRITE_RETRY_DELAY_MS: u64 = 22;
     const DDC_MIN_TRANSACTION_GAP_MS: u64 = 130;
     const DDC_UNRECOVERABLE_READ_FAILURE_THRESHOLD: usize = 2;
-    const DDC_MAX_TRANSITION_WRITES: u16 = 12;
+    const DDC_TRANSIENT_PARSE_FAILURE_THRESHOLD: usize = 3;
+    const DDC_TARGET_TRANSITION_STEP_SIZE: u16 = 2;
+    const DDC_MAX_TRANSITION_WRITES: u16 = 18;
+    const RGB_GAIN_FALLBACK_MAX: u16 = 100;
 
     type DdcShadowState = HashMap<String, HashMap<String, u16>>;
     type DdcReadbackState = HashMap<String, HashMap<String, DdcReadbackHealth>>;
+    type DdcCapabilityState = HashMap<String, Option<HashMap<String, Vec<u16>>>>;
 
     #[derive(Clone, Debug)]
     enum DdcReadbackHealth {
@@ -1011,6 +1105,14 @@ mod imp {
         red_percent: u8,
         green_percent: u8,
         blue_percent: u8,
+    }
+
+    #[derive(Clone)]
+    struct RgbGainTransitionPlan {
+        code: String,
+        feature_code: u8,
+        current: u16,
+        target: u16,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1060,11 +1162,6 @@ mod imp {
             code: "1A",
             label: "Blue Gain",
             kind: DdcFeatureKind::Range,
-        },
-        DdcFeatureDefinition {
-            code: "60",
-            label: "Input Source",
-            kind: DdcFeatureKind::Choice,
         },
         DdcFeatureDefinition {
             code: "DC",
@@ -1334,6 +1431,9 @@ mod imp {
         let monitor_id = canonical_monitor_id(monitor_id);
         let normalized_code = code.to_ascii_uppercase();
         debug!(monitor_id, code, value, "set monitor feature");
+        if normalized_code == INPUT_SOURCE_CODE {
+            bail!("Input source control is disabled in this app");
+        }
         if let Some(display_id) = parse_builtin_monitor_id(monitor_id) {
             return set_builtin_feature(display_id, code, value);
         }
@@ -1346,14 +1446,13 @@ mod imp {
 
         if normalized_code == BRIGHTNESS_CODE {
             let readback_broken = ddc_readback_broken_reason(monitor_id, BRIGHTNESS_CODE).is_some();
-            let cached_brightness = ddc_shadow_get(monitor_id, BRIGHTNESS_CODE);
-            if readback_broken || cached_brightness.is_some() {
+            if readback_broken {
                 debug!(
                     monitor_id,
                     "using cached write-only mode for brightness set"
                 );
                 let clamped = value.min(100);
-                set_external_ddc_brightness(&mut display, clamped)?;
+                set_external_ddc_brightness_write_only(monitor_id, &mut display, clamped)?;
                 ddc_shadow_set(monitor_id, BRIGHTNESS_CODE, clamped);
             } else {
                 match retry_ddc(
@@ -1378,7 +1477,7 @@ mod imp {
                         }
                         // Some adapters do not support VCP readback, but writes still work.
                         let clamped = value.min(100);
-                        set_external_ddc_brightness(&mut display, clamped)?;
+                        set_external_ddc_brightness_write_only(monitor_id, &mut display, clamped)?;
                         ddc_shadow_set(monitor_id, BRIGHTNESS_CODE, clamped);
                     }
                 }
@@ -1391,15 +1490,33 @@ mod imp {
                     | GainWriteReadiness::PresetAliased(_) => {}
                 }
             }
-            let feature_code = parse_ddc_feature_code(normalized_code.as_str())?;
-            set_external_ddc_feature(&mut display, feature_code, value, normalized_code.as_str())?;
-            ddc_shadow_set(monitor_id, normalized_code.as_str(), value);
+            if normalized_code == INPUT_SOURCE_CODE {
+                let verified = set_external_ddc_input_source(monitor_id, &mut display, value)?;
+                if verified {
+                    ddc_shadow_set(monitor_id, normalized_code.as_str(), value);
+                } else {
+                    debug!(
+                        monitor_id,
+                        requested_value = value,
+                        "input source write is unverified; leaving cached value unchanged"
+                    );
+                }
+            } else {
+                let feature_code = parse_ddc_feature_code(normalized_code.as_str())?;
+                set_external_ddc_feature(
+                    &mut display,
+                    feature_code,
+                    value,
+                    normalized_code.as_str(),
+                )?;
+                ddc_shadow_set(monitor_id, normalized_code.as_str(), value);
+            }
         }
 
         let ddc_index = parse_ddc_monitor_id(monitor_id)
             .map(|(index, _)| index)
             .unwrap_or(0);
-        Ok(snapshot_from_ddc_display_cached(&display, ddc_index))
+        Ok(snapshot_from_ddc_display_cached(&mut display, ddc_index))
     }
 
     pub fn transition_monitor_feature(
@@ -1413,11 +1530,18 @@ mod imp {
             monitor_id,
             code, value, step_delay_ms, "transition monitor feature"
         );
-        if !code.eq_ignore_ascii_case(BRIGHTNESS_CODE) || step_delay_ms == 0 {
-            return set_monitor_feature(monitor_id, code, value);
+        let normalized_code = code.to_ascii_uppercase();
+        if normalized_code == INPUT_SOURCE_CODE {
+            bail!("Input source control is disabled in this app");
+        }
+        if step_delay_ms == 0 || !is_ddc_range_code(normalized_code.as_str()) {
+            return set_monitor_feature(monitor_id, normalized_code.as_str(), value);
         }
 
         if let Some(display_id) = parse_builtin_monitor_id(monitor_id) {
+            if normalized_code != BRIGHTNESS_CODE {
+                return set_monitor_feature(monitor_id, normalized_code.as_str(), value);
+            }
             let current = percent_from_unit(read_builtin_display_brightness(display_id)?);
             let target = value.min(100);
             ramp_brightness(current, target, step_delay_ms, |next| {
@@ -1427,69 +1551,72 @@ mod imp {
         }
 
         if parse_backlight_monitor_id(monitor_id).is_some() {
+            if normalized_code != BRIGHTNESS_CODE {
+                return set_monitor_feature(monitor_id, normalized_code.as_str(), value);
+            }
             return transition_backlight_feature(monitor_id, value, step_delay_ms);
         }
 
         let mut display = find_ddc_display(monitor_id)?;
-        let readback_broken = ddc_readback_broken_reason(monitor_id, BRIGHTNESS_CODE).is_some();
-        let cached_brightness = ddc_shadow_get(monitor_id, BRIGHTNESS_CODE);
-        if readback_broken || cached_brightness.is_some() {
-            debug!(
-                monitor_id,
-                "using cached write-only mode for brightness transition"
-            );
-            let target = value.min(100);
-            let current = cached_brightness.unwrap_or(target);
-            if current == target {
-                set_external_ddc_brightness(&mut display, target)?;
+        if normalized_code == BRIGHTNESS_CODE {
+            let readback_broken = ddc_readback_broken_reason(monitor_id, BRIGHTNESS_CODE).is_some();
+            if readback_broken {
+                debug!(
+                    monitor_id,
+                    "using cached write-only mode for brightness transition"
+                );
+                let target = value.min(100);
+                // Write-only links are typically unstable under repeated writes and can
+                // visibly blank/flicker. Apply the final value directly.
+                set_external_ddc_brightness_write_only(monitor_id, &mut display, target)?;
+                ddc_shadow_set(monitor_id, BRIGHTNESS_CODE, target);
             } else {
-                ramp_ddc_brightness(current, target, step_delay_ms, |next| {
-                    set_external_ddc_brightness(&mut display, next)
-                })?;
-            }
-            ddc_shadow_set(monitor_id, BRIGHTNESS_CODE, target);
-        } else {
-            match retry_ddc(
-                &format!(
-                    "read VCP Brightness (10) for monitor {monitor_id} before transition to {value}"
-                ),
-                || display.handle.get_vcp_feature(LUMINANCE_CODE),
-            ) {
-                Ok(current) => {
-                    ddc_mark_readable(monitor_id, BRIGHTNESS_CODE);
-                    let maximum = current.maximum();
-                    if maximum == 0 {
-                        bail!("Monitor reported an invalid brightness range");
-                    }
-                    let target = value.min(maximum);
-                    ramp_ddc_brightness(current.value(), target, step_delay_ms, |next| {
-                        set_external_ddc_brightness(&mut display, next)
-                    })?;
-                    ddc_shadow_set(monitor_id, BRIGHTNESS_CODE, target);
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    if is_invalid_length_error(&message) {
-                        ddc_mark_readback_broken(monitor_id, BRIGHTNESS_CODE, message);
-                    }
-                    let target = value.min(100);
-                    let current = ddc_shadow_get(monitor_id, BRIGHTNESS_CODE).unwrap_or(target);
-                    if current == target {
-                        set_external_ddc_brightness(&mut display, target)?;
-                    } else {
-                        ramp_ddc_brightness(current, target, step_delay_ms, |next| {
+                match retry_ddc(
+                    &format!(
+                        "read VCP Brightness (10) for monitor {monitor_id} before transition to {value}"
+                    ),
+                    || display.handle.get_vcp_feature(LUMINANCE_CODE),
+                ) {
+                    Ok(current) => {
+                        ddc_mark_readable(monitor_id, BRIGHTNESS_CODE);
+                        let maximum = current.maximum();
+                        if maximum == 0 {
+                            bail!("Monitor reported an invalid brightness range");
+                        }
+                        let target = value.min(maximum);
+                        ramp_ddc_brightness(current.value(), target, step_delay_ms, |next| {
                             set_external_ddc_brightness(&mut display, next)
                         })?;
+                        ddc_shadow_set(monitor_id, BRIGHTNESS_CODE, target);
                     }
-                    ddc_shadow_set(monitor_id, BRIGHTNESS_CODE, target);
+                    Err(error) => {
+                        let message = error.to_string();
+                        if is_invalid_length_error(&message) {
+                            ddc_mark_readback_broken(monitor_id, BRIGHTNESS_CODE, message);
+                        }
+                        let target = value.min(100);
+                        // If readback fails, treat the link as write-only and avoid ramping.
+                        // Repeated DDC writes are what triggers visible blank/flicker on
+                        // unstable bridges.
+                        set_external_ddc_brightness_write_only(monitor_id, &mut display, target)?;
+                        ddc_shadow_set(monitor_id, BRIGHTNESS_CODE, target);
+                    }
                 }
             }
+        } else {
+            transition_external_ddc_range_feature(
+                monitor_id,
+                &mut display,
+                normalized_code.as_str(),
+                value,
+                step_delay_ms,
+            )?;
         }
 
         let ddc_index = parse_ddc_monitor_id(monitor_id)
             .map(|(index, _)| index)
             .unwrap_or(0);
-        Ok(snapshot_from_ddc_display_cached(&display, ddc_index))
+        Ok(snapshot_from_ddc_display_cached(&mut display, ddc_index))
     }
 
     pub fn apply_color_scene(monitor_id: &str, scene_id: &str) -> Result<MonitorSnapshot> {
@@ -1511,24 +1638,67 @@ mod imp {
             | GainWriteReadiness::PresetAliased(_) => {}
         }
 
-        apply_rgb_gain_percent(monitor_id, &mut display, RED_GAIN_CODE, profile.red_percent)?;
-        apply_rgb_gain_percent(
-            monitor_id,
-            &mut display,
-            GREEN_GAIN_CODE,
-            profile.green_percent,
-        )?;
-        apply_rgb_gain_percent(
-            monitor_id,
-            &mut display,
-            BLUE_GAIN_CODE,
-            profile.blue_percent,
-        )?;
+        let plans = vec![
+            prepare_rgb_gain_transition_plan(
+                monitor_id,
+                &mut display,
+                RED_GAIN_CODE,
+                profile.red_percent,
+            )?,
+            prepare_rgb_gain_transition_plan(
+                monitor_id,
+                &mut display,
+                GREEN_GAIN_CODE,
+                profile.green_percent,
+            )?,
+            prepare_rgb_gain_transition_plan(
+                monitor_id,
+                &mut display,
+                BLUE_GAIN_CODE,
+                profile.blue_percent,
+            )?,
+        ];
+        drop(display);
+
+        thread::scope(|scope| -> Result<()> {
+            let mut handles = Vec::with_capacity(plans.len());
+            for plan in plans {
+                let monitor_id_owned = monitor_id.to_string();
+                handles.push(scope.spawn(move || -> Result<(String, u16)> {
+                    apply_rgb_gain_transition_plan(monitor_id_owned.as_str(), &plan)?;
+                    Ok((plan.code.clone(), plan.target))
+                }));
+            }
+
+            let mut first_error: Option<anyhow::Error> = None;
+            for handle in handles {
+                match handle.join() {
+                    Ok(Ok((code, target))) => ddc_shadow_set(monitor_id, code.as_str(), target),
+                    Ok(Err(error)) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                    Err(_) => {
+                        if first_error.is_none() {
+                            first_error = Some(anyhow!("RGB gain transition task panicked"));
+                        }
+                    }
+                }
+            }
+
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+            Ok(())
+        })?;
+
+        let mut display = find_ddc_display(monitor_id)?;
 
         let ddc_index = parse_ddc_monitor_id(monitor_id)
             .map(|(index, _)| index)
             .unwrap_or(0);
-        Ok(snapshot_from_ddc_display_cached(&display, ddc_index))
+        Ok(snapshot_from_ddc_display_cached(&mut display, ddc_index))
     }
 
     fn snapshot_from_ddc_display(display: &mut Display, index: usize) -> MonitorSnapshot {
@@ -1591,7 +1761,13 @@ mod imp {
         };
 
         let mut controls = Vec::with_capacity(DDC_FEATURE_DEFINITIONS.len());
+        let capability_vcp_values =
+            read_ddc_capability_vcp_values(snapshot_id.as_str(), display, true).unwrap_or_default();
+        let options_for = |code: &str, kind: DdcFeatureKind| {
+            resolved_ddc_feature_options(code, kind, capability_vcp_values.get(code))
+        };
         let mut unrecoverable_read_failures = 0usize;
+        let mut consecutive_transient_parse_failures = 0usize;
         let mut skip_remaining_non_brightness_reads_reason: Option<String> = None;
         for definition in DDC_FEATURE_DEFINITIONS {
             if definition.code == BRIGHTNESS_CODE
@@ -1603,7 +1779,7 @@ mod imp {
                     control_type: control_type_from_kind(definition.kind),
                     current_value: Some(value),
                     max_value: Some(max),
-                    options: ddc_feature_options(definition.code, definition.kind),
+                    options: options_for(definition.code, definition.kind),
                     supported: true,
                     error: None,
                 });
@@ -1612,13 +1788,14 @@ mod imp {
             if definition.code == BRIGHTNESS_CODE
                 && let Some(reason) = brightness_probe_error.as_ref()
             {
+                let seeded_value = ddc_shadow_get(snapshot_id.as_str(), definition.code);
                 controls.push(MonitorControl {
                     code: definition.code.to_string(),
                     label: definition.label.to_string(),
                     control_type: control_type_from_kind(definition.kind),
-                    current_value: ddc_shadow_get(snapshot_id.as_str(), definition.code),
+                    current_value: seeded_value,
                     max_value: Some(100),
-                    options: ddc_feature_options(definition.code, definition.kind),
+                    options: options_for(definition.code, definition.kind),
                     supported: true,
                     error: Some(format!(
                         "{} readback unavailable ({reason}); write will be attempted.",
@@ -1631,17 +1808,18 @@ mod imp {
                 && let Some(reason) =
                     ddc_readback_broken_reason(snapshot_id.as_str(), definition.code)
             {
+                let seeded_value = ddc_shadow_get(snapshot_id.as_str(), definition.code);
                 controls.push(MonitorControl {
                     code: definition.code.to_string(),
                     label: definition.label.to_string(),
                     control_type: control_type_from_kind(definition.kind),
-                    current_value: ddc_shadow_get(snapshot_id.as_str(), definition.code),
+                    current_value: seeded_value,
                     max_value: if matches!(definition.kind, DdcFeatureKind::Range) {
                         Some(100)
                     } else {
                         None
                     },
-                    options: ddc_feature_options(definition.code, definition.kind),
+                    options: options_for(definition.code, definition.kind),
                     supported: true,
                     error: Some(format!(
                         "{} readback unavailable ({reason}); write will be attempted.",
@@ -1658,7 +1836,7 @@ mod imp {
                         control_type: MonitorControlType::Action,
                         current_value: None,
                         max_value: None,
-                        options: ddc_feature_options(definition.code, definition.kind),
+                        options: options_for(definition.code, definition.kind),
                         supported: true,
                         error: None,
                     });
@@ -1677,7 +1855,7 @@ mod imp {
                             } else {
                                 None
                             },
-                            options: ddc_feature_options(definition.code, definition.kind),
+                            options: options_for(definition.code, definition.kind),
                             supported: true,
                             error: Some(format!(
                                 "{} readback skipped ({reason}); write will be attempted.",
@@ -1696,7 +1874,7 @@ mod imp {
                                 control_type: control_type_from_kind(definition.kind),
                                 current_value: None,
                                 max_value: None,
-                                options: ddc_feature_options(definition.code, definition.kind),
+                                options: options_for(definition.code, definition.kind),
                                 supported: false,
                                 error: Some(error.to_string()),
                             });
@@ -1715,6 +1893,7 @@ mod imp {
                     ) {
                         Ok(feature) => {
                             let monitor_id = display.info.id.as_str();
+                            consecutive_transient_parse_failures = 0;
                             ddc_mark_readable(snapshot_id.as_str(), definition.code);
                             ddc_shadow_set(snapshot_id.as_str(), definition.code, feature.value());
                             debug!(
@@ -1736,7 +1915,7 @@ mod imp {
                                 } else {
                                     None
                                 },
-                                options: ddc_feature_options(definition.code, definition.kind),
+                                options: options_for(definition.code, definition.kind),
                                 supported: true,
                                 error: None,
                             });
@@ -1744,6 +1923,25 @@ mod imp {
                         Err(error) => {
                             let monitor_id = display.info.id.as_str();
                             let message = error.to_string();
+                            if is_transient_ddc_parse_error(&message) {
+                                consecutive_transient_parse_failures += 1;
+                                if definition.code != BRIGHTNESS_CODE
+                                    && consecutive_transient_parse_failures
+                                        >= DDC_TRANSIENT_PARSE_FAILURE_THRESHOLD
+                                    && skip_remaining_non_brightness_reads_reason.is_none()
+                                {
+                                    skip_remaining_non_brightness_reads_reason =
+                                        Some(String::from("repeated transient DDC parse failures"));
+                                    debug!(
+                                        ddc_index = index,
+                                        monitor_id,
+                                        failures = consecutive_transient_parse_failures,
+                                        "skipping remaining non-brightness DDC reads after repeated transient parse failures"
+                                    );
+                                }
+                            } else {
+                                consecutive_transient_parse_failures = 0;
+                            }
                             if is_unrecoverable_ddc_read_error(&message) {
                                 ddc_mark_readback_broken(
                                     snapshot_id.as_str(),
@@ -1774,17 +1972,19 @@ mod imp {
                                 error = %message,
                                 "DDC feature read failed"
                             );
+                            let current_value =
+                                ddc_shadow_get(snapshot_id.as_str(), definition.code);
                             controls.push(MonitorControl {
                                 code: definition.code.to_string(),
                                 label: definition.label.to_string(),
                                 control_type: control_type_from_kind(definition.kind),
-                                current_value: ddc_shadow_get(snapshot_id.as_str(), definition.code),
+                                current_value,
                                 max_value: if matches!(definition.kind, DdcFeatureKind::Range) {
                                     Some(100)
                                 } else {
                                     None
                                 },
-                                options: ddc_feature_options(definition.code, definition.kind),
+                                options: options_for(definition.code, definition.kind),
                                 supported: true,
                                 error: Some(format!(
                                     "{} readback failed over DDC/CI ({}); writes will still be attempted.",
@@ -1797,6 +1997,23 @@ mod imp {
                     }
                 }
             }
+        }
+        if let Some(input_control) = controls
+            .iter()
+            .find(|control| control.code == INPUT_SOURCE_CODE)
+        {
+            let option_values: Vec<String> = input_control
+                .options
+                .iter()
+                .map(|option| format!("{:02X}", option.value))
+                .collect();
+            debug!(
+                ddc_index = index,
+                monitor_id = snapshot_id.as_str(),
+                current_value = ?input_control.current_value,
+                option_values = ?option_values,
+                "resolved input source options for snapshot"
+            );
         }
 
         let model_name = display
@@ -1831,9 +2048,15 @@ mod imp {
         }
     }
 
-    fn snapshot_from_ddc_display_cached(display: &Display, index: usize) -> MonitorSnapshot {
+    fn snapshot_from_ddc_display_cached(display: &mut Display, index: usize) -> MonitorSnapshot {
         let snapshot_id = ddc_snapshot_monitor_id(index, display);
         let mut controls = Vec::with_capacity(DDC_FEATURE_DEFINITIONS.len());
+        let capability_vcp_values =
+            read_ddc_capability_vcp_values(snapshot_id.as_str(), display, false)
+                .unwrap_or_default();
+        let options_for = |code: &str, kind: DdcFeatureKind| {
+            resolved_ddc_feature_options(code, kind, capability_vcp_values.get(code))
+        };
         for definition in DDC_FEATURE_DEFINITIONS {
             if matches!(definition.kind, DdcFeatureKind::Action) {
                 controls.push(MonitorControl {
@@ -1842,7 +2065,7 @@ mod imp {
                     control_type: MonitorControlType::Action,
                     current_value: None,
                     max_value: None,
-                    options: ddc_feature_options(definition.code, definition.kind),
+                    options: options_for(definition.code, definition.kind),
                     supported: true,
                     error: None,
                 });
@@ -1856,20 +2079,38 @@ mod imp {
                         definition.label
                     )
                 });
+            let current_value = ddc_shadow_get(snapshot_id.as_str(), definition.code);
             controls.push(MonitorControl {
                 code: definition.code.to_string(),
                 label: definition.label.to_string(),
                 control_type: control_type_from_kind(definition.kind),
-                current_value: ddc_shadow_get(snapshot_id.as_str(), definition.code),
+                current_value,
                 max_value: if matches!(definition.kind, DdcFeatureKind::Range) {
                     Some(100)
                 } else {
                     None
                 },
-                options: ddc_feature_options(definition.code, definition.kind),
+                options: options_for(definition.code, definition.kind),
                 supported: true,
                 error: readback_error,
             });
+        }
+        if let Some(input_control) = controls
+            .iter()
+            .find(|control| control.code == INPUT_SOURCE_CODE)
+        {
+            let option_values: Vec<String> = input_control
+                .options
+                .iter()
+                .map(|option| format!("{:02X}", option.value))
+                .collect();
+            debug!(
+                ddc_index = index,
+                monitor_id = snapshot_id.as_str(),
+                current_value = ?input_control.current_value,
+                option_values = ?option_values,
+                "resolved input source options for cached snapshot"
+            );
         }
 
         let model_name = display
@@ -2779,9 +3020,250 @@ mod imp {
         }
     }
 
+    fn read_ddc_capability_vcp_values(
+        monitor_id: &str,
+        display: &mut Display,
+        allow_probe: bool,
+    ) -> Option<HashMap<String, Vec<u16>>> {
+        if let Some(cached) = ddc_capability_get(monitor_id) {
+            return cached;
+        }
+        if !allow_probe {
+            return None;
+        }
+
+        let capabilities = retry_ddc(
+            &format!("read MCCS capabilities for monitor {monitor_id}"),
+            || display.handle.capabilities_string(),
+        )
+        .ok();
+        let Some(capabilities) = capabilities else {
+            ddc_capability_set(monitor_id, None);
+            return None;
+        };
+
+        let capabilities_text = String::from_utf8_lossy(capabilities.as_slice());
+        let vcp_values = parse_ddc_capability_vcp_values(capabilities_text.as_ref());
+        if let Some(input_values) = vcp_values.get(INPUT_SOURCE_CODE) {
+            debug!(
+                monitor_id,
+                values = ?input_values,
+                "parsed input source values from MCCS capabilities"
+            );
+        }
+        if vcp_values.is_empty() {
+            debug!(
+                monitor_id,
+                "monitor did not expose parseable VCP capability values; using fallback options"
+            );
+            ddc_capability_set(monitor_id, None);
+            return None;
+        }
+
+        ddc_capability_set(monitor_id, Some(vcp_values.clone()));
+        Some(vcp_values)
+    }
+
+    fn parse_ddc_capability_vcp_values(capabilities: &str) -> HashMap<String, Vec<u16>> {
+        let mut features = HashMap::<String, Vec<u16>>::new();
+        let Some(vcp_section) = extract_capability_group(capabilities, "vcp") else {
+            return features;
+        };
+
+        let bytes = vcp_section.as_bytes();
+        let mut cursor = 0usize;
+        while cursor < bytes.len() {
+            while cursor < bytes.len() && !bytes[cursor].is_ascii_hexdigit() {
+                cursor += 1;
+            }
+            if cursor + 1 >= bytes.len() {
+                break;
+            }
+            if !bytes[cursor + 1].is_ascii_hexdigit() {
+                cursor += 1;
+                continue;
+            }
+
+            let code = vcp_section[cursor..cursor + 2].to_ascii_uppercase();
+            cursor += 2;
+
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+
+            if cursor >= bytes.len() || bytes[cursor] != b'(' {
+                features.entry(code).or_default();
+                continue;
+            }
+
+            let Some(group_end) = find_matching_parenthesis(vcp_section, cursor) else {
+                break;
+            };
+            let raw_values = &vcp_section[cursor + 1..group_end];
+            let mut values = Vec::new();
+            for token in raw_values
+                .split(|ch: char| !ch.is_ascii_hexdigit())
+                .filter(|token| !token.is_empty())
+            {
+                if let Ok(value) = u16::from_str_radix(token, 16)
+                    && !values.contains(&value)
+                {
+                    values.push(value);
+                }
+            }
+            features.insert(code, values);
+            cursor = group_end + 1;
+        }
+
+        features
+    }
+
+    fn extract_capability_group<'a>(capabilities: &'a str, group: &str) -> Option<&'a str> {
+        let marker = format!("{group}(");
+        let start = capabilities.find(marker.as_str())?;
+        let open_index = start + group.len();
+        let close_index = find_matching_parenthesis(capabilities, open_index)?;
+        Some(&capabilities[open_index + 1..close_index])
+    }
+
+    fn find_matching_parenthesis(text: &str, open_index: usize) -> Option<usize> {
+        let bytes = text.as_bytes();
+        if bytes.get(open_index) != Some(&b'(') {
+            return None;
+        }
+
+        let mut depth = 0usize;
+        for (index, byte) in bytes.iter().enumerate().skip(open_index) {
+            if *byte == b'(' {
+                depth += 1;
+                continue;
+            }
+            if *byte == b')' {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn resolved_ddc_feature_options(
+        code: &str,
+        kind: DdcFeatureKind,
+        capability_values: Option<&Vec<u16>>,
+    ) -> Vec<shared::ControlOption> {
+        let fallback = ddc_feature_options(code, kind);
+        if code == INPUT_SOURCE_CODE {
+            return merged_input_source_options(capability_values, &fallback);
+        }
+
+        let Some(capability_values) = capability_values else {
+            return fallback;
+        };
+        if capability_values.is_empty() {
+            return fallback;
+        }
+
+        let mut resolved = Vec::with_capacity(capability_values.len());
+        for value in capability_values {
+            let label = if code == INPUT_SOURCE_CODE {
+                // Monitors often repurpose MCCS input codes; avoid misleading fixed names.
+                format!("Input 0x{value:02X}")
+            } else {
+                fallback
+                    .iter()
+                    .find(|option| option.value == *value)
+                    .map(|option| option.label.clone())
+                    .unwrap_or_else(|| format!("0x{value:02X}"))
+            };
+            resolved.push(shared::ControlOption {
+                value: *value,
+                label,
+            });
+        }
+
+        if resolved.is_empty() {
+            fallback
+        } else {
+            resolved
+        }
+    }
+
+    fn merged_input_source_options(
+        capability_values: Option<&Vec<u16>>,
+        fallback: &[shared::ControlOption],
+    ) -> Vec<shared::ControlOption> {
+        if let Some(capability_values) = capability_values
+            && !capability_values.is_empty()
+        {
+            let capability_max = *capability_values.iter().max().unwrap_or(&0);
+            // Some monitors report sparse capability values like [01, 03] while runtime
+            // readback shows max=3. Treat this as a compact enumerated domain 1..=max.
+            if capability_max <= 4
+                && capability_values
+                    .iter()
+                    .all(|value| (1..=capability_max).contains(value))
+            {
+                return (1..=capability_max)
+                    .map(|value| shared::ControlOption {
+                        value,
+                        label: format!("Input 0x{value:02X}"),
+                    })
+                    .collect();
+            }
+        }
+
+        // Capabilities are frequently incomplete/wrong for VCP 60. Include known/common
+        // source codes so users can test the real panel mapping directly.
+        const COMMON_INPUT_CODES: &[u16] = &[
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x1B,
+        ];
+
+        let mut values = Vec::<u16>::new();
+        if let Some(capability_values) = capability_values {
+            for value in capability_values {
+                if !values.contains(value) {
+                    values.push(*value);
+                }
+            }
+        }
+        for option in fallback {
+            if !values.contains(&option.value) {
+                values.push(option.value);
+            }
+        }
+        for value in COMMON_INPUT_CODES {
+            if !values.contains(value) {
+                values.push(*value);
+            }
+        }
+
+        values
+            .into_iter()
+            .map(|value| shared::ControlOption {
+                value,
+                label: format!("Input 0x{value:02X}"),
+            })
+            .collect()
+    }
+
     fn set_external_ddc_brightness(display: &mut Display, value: u16) -> Result<()> {
         let monitor_id = display.info.id.as_str();
         debug!(monitor_id, value, "set external DDC brightness requested");
+        set_external_ddc_feature(display, LUMINANCE_CODE, value, BRIGHTNESS_CODE)
+    }
+
+    fn set_external_ddc_brightness_write_only(
+        monitor_id: &str,
+        display: &mut Display,
+        value: u16,
+    ) -> Result<()> {
+        debug!(
+            monitor_id,
+            value, "set external DDC brightness in write-only mode"
+        );
         set_external_ddc_feature(display, LUMINANCE_CODE, value, BRIGHTNESS_CODE)
     }
 
@@ -2813,6 +3295,47 @@ mod imp {
             );
         }
         result
+    }
+
+    fn set_external_ddc_input_source(
+        monitor_id: &str,
+        display: &mut Display,
+        value: u16,
+    ) -> Result<bool> {
+        let feature_code = parse_ddc_feature_code(INPUT_SOURCE_CODE)?;
+        set_external_ddc_feature(display, feature_code, value, INPUT_SOURCE_CODE)?;
+        thread::sleep(Duration::from_millis(INPUT_SOURCE_SETTLE_MS));
+
+        match retry_ddc(
+            &format!("read VCP {INPUT_SOURCE_CODE} for monitor {monitor_id} after input write"),
+            || display.handle.get_vcp_feature(feature_code),
+        ) {
+            Ok(feature) => {
+                ddc_mark_readable(monitor_id, INPUT_SOURCE_CODE);
+                let observed = feature.value();
+                if observed == value {
+                    return Ok(true);
+                }
+
+                debug!(
+                    monitor_id,
+                    requested_value = value,
+                    observed_value = observed,
+                    "input source write did not match readback"
+                );
+                // Samsung and some MST/bridge paths apply the source switch but keep
+                // reporting the previous source immediately after the write.
+                return Ok(false);
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if is_unrecoverable_ddc_read_error(&message) {
+                    ddc_mark_readback_broken(monitor_id, INPUT_SOURCE_CODE, message);
+                }
+                // Switching input can make immediate readback unavailable on some links.
+                return Ok(false);
+            }
+        }
     }
 
     fn set_user_color_preset_if_possible(
@@ -2871,108 +3394,160 @@ mod imp {
         GainWriteReadiness::PresetAliased(current_preset.value())
     }
 
-    fn apply_rgb_gain_percent(
+    fn prepare_rgb_gain_transition_plan(
         monitor_id: &str,
         display: &mut Display,
         code: &str,
         percent: u8,
-    ) -> Result<()> {
+    ) -> Result<RgbGainTransitionPlan> {
         let feature_code = parse_ddc_feature_code(code)?;
-        let maximum = match retry_ddc(
+        let (current_value, maximum) = match retry_ddc(
             &format!("read VCP {code} for monitor {monitor_id} before warm scene apply"),
             || display.handle.get_vcp_feature(feature_code),
         ) {
             Ok(current) => {
                 ddc_mark_readable(monitor_id, code);
-                current.maximum().max(1)
+                (Some(current.value()), current.maximum().max(1))
             }
             Err(error) => {
                 let message = error.to_string();
                 if is_invalid_length_error(&message) {
                     ddc_mark_readback_broken(monitor_id, code, message);
                 }
-                let inferred_max =
-                    infer_rgb_gain_max_from_siblings(monitor_id, display, code).unwrap_or(255);
                 debug!(
                     monitor_id,
                     code,
-                    inferred_max,
-                    "falling back to inferred RGB gain maximum after read failure"
+                    fallback_max = RGB_GAIN_FALLBACK_MAX,
+                    "falling back to default RGB gain maximum after read failure"
                 );
-                inferred_max
+                (ddc_shadow_get(monitor_id, code), RGB_GAIN_FALLBACK_MAX)
             }
         };
 
         let clamped_percent = percent.min(100) as u32;
         let target = (((maximum as u32) * clamped_percent) + 50) / 100;
         let value = target.min(maximum as u32) as u16;
-        set_external_ddc_feature(display, feature_code, value, code)?;
-        ddc_shadow_set(monitor_id, code, value);
-
-        Ok(())
+        let current = current_value.unwrap_or(value).min(maximum);
+        Ok(RgbGainTransitionPlan {
+            code: code.to_string(),
+            feature_code,
+            current,
+            target: value,
+        })
     }
 
-    fn infer_rgb_gain_max_from_siblings(
+    fn apply_rgb_gain_transition_plan(
+        monitor_id: &str,
+        plan: &RgbGainTransitionPlan,
+    ) -> Result<()> {
+        let mut display = find_ddc_display(monitor_id)?;
+        if plan.current == plan.target {
+            set_external_ddc_feature(
+                &mut display,
+                plan.feature_code,
+                plan.target,
+                plan.code.as_str(),
+            )
+        } else {
+            ramp_ddc_brightness(
+                plan.current,
+                plan.target,
+                COLOR_SCENE_GAIN_STEP_DELAY_MS,
+                |next| {
+                    set_external_ddc_feature(
+                        &mut display,
+                        plan.feature_code,
+                        next,
+                        plan.code.as_str(),
+                    )
+                },
+            )
+        }
+    }
+
+    fn transition_external_ddc_range_feature(
         monitor_id: &str,
         display: &mut Display,
-        failed_code: &str,
-    ) -> Option<u16> {
-        for sibling_code in [RED_GAIN_CODE, GREEN_GAIN_CODE, BLUE_GAIN_CODE] {
-            if sibling_code == failed_code {
-                continue;
-            }
-
-            let feature_code = match parse_ddc_feature_code(sibling_code) {
-                Ok(code) => code,
-                Err(_) => continue,
-            };
-
-            let sibling_read = retry_ddc(
-                &format!(
-                    "read sibling VCP {sibling_code} for monitor {monitor_id} after {failed_code} read failure"
-                ),
-                || display.handle.get_vcp_feature(feature_code),
-            );
-            if let Ok(readout) = sibling_read {
-                ddc_mark_readable(monitor_id, sibling_code);
-                return Some(readout.maximum().max(1));
+        code: &str,
+        value: u16,
+        step_delay_ms: u64,
+    ) -> Result<()> {
+        if is_rgb_gain_code(code) {
+            match set_user_color_preset_if_possible(monitor_id, display) {
+                GainWriteReadiness::Ready
+                | GainWriteReadiness::Unverified
+                | GainWriteReadiness::PresetAliased(_) => {}
             }
         }
 
-        None
+        let feature_code = parse_ddc_feature_code(code)?;
+        let (current_value, maximum) = match retry_ddc(
+            &format!("read VCP {code} for monitor {monitor_id} before transition to {value}"),
+            || display.handle.get_vcp_feature(feature_code),
+        ) {
+            Ok(current) => {
+                ddc_mark_readable(monitor_id, code);
+                (Some(current.value()), current.maximum().max(1))
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if is_unrecoverable_ddc_read_error(&message) {
+                    ddc_mark_readback_broken(monitor_id, code, message);
+                }
+                let fallback_max = if is_rgb_gain_code(code) {
+                    RGB_GAIN_FALLBACK_MAX
+                } else {
+                    100
+                };
+                (ddc_shadow_get(monitor_id, code), fallback_max.max(1))
+            }
+        };
+
+        let target = value.min(maximum);
+        let current = current_value.unwrap_or(target).min(maximum);
+        if current == target {
+            set_external_ddc_feature(display, feature_code, target, code)?;
+        } else {
+            ramp_ddc_brightness(current, target, step_delay_ms, |next| {
+                set_external_ddc_feature(display, feature_code, next, code)
+            })?;
+        }
+        ddc_shadow_set(monitor_id, code, target);
+
+        Ok(())
     }
 
     fn color_scene_profile(scene_id: &str) -> Option<ColorSceneProfile> {
         match scene_id {
             "paper" => Some(ColorSceneProfile {
-                red_percent: 100,
-                green_percent: 90,
-                blue_percent: 76,
+                red_percent: 94,
+                green_percent: 92,
+                blue_percent: 88,
             }),
             "sunset" => Some(ColorSceneProfile {
                 red_percent: 100,
-                green_percent: 82,
-                blue_percent: 62,
+                green_percent: 72,
+                blue_percent: 46,
             }),
             "ember" => Some(ColorSceneProfile {
                 red_percent: 100,
-                green_percent: 72,
-                blue_percent: 48,
+                green_percent: 62,
+                blue_percent: 32,
             }),
             "incandescent" => Some(ColorSceneProfile {
-                red_percent: 100,
-                green_percent: 78,
-                blue_percent: 55,
-            }),
-            "candle" => Some(ColorSceneProfile {
-                red_percent: 100,
-                green_percent: 66,
+                red_percent: 96,
+                green_percent: 68,
                 blue_percent: 38,
             }),
+            "candle" => Some(ColorSceneProfile {
+                red_percent: 92,
+                green_percent: 56,
+                blue_percent: 24,
+            }),
             "nocturne" => Some(ColorSceneProfile {
-                red_percent: 100,
-                green_percent: 58,
-                blue_percent: 28,
+                red_percent: 84,
+                green_percent: 46,
+                blue_percent: 14,
             }),
             _ => None,
         }
@@ -2980,6 +3555,13 @@ mod imp {
 
     fn is_rgb_gain_code(code: &str) -> bool {
         matches!(code, RED_GAIN_CODE | GREEN_GAIN_CODE | BLUE_GAIN_CODE)
+    }
+
+    fn is_ddc_range_code(code: &str) -> bool {
+        DDC_FEATURE_DEFINITIONS.iter().any(|definition| {
+            definition.code.eq_ignore_ascii_case(code)
+                && matches!(definition.kind, DdcFeatureKind::Range)
+        })
     }
 
     fn retry_ddc<T, E, F>(action: &str, mut op: F) -> Result<T>
@@ -2991,8 +3573,13 @@ mod imp {
         let is_read = action.contains(" read ")
             || action.starts_with("read ")
             || action.starts_with("probe read ");
+        let is_scene_gain_probe = action.contains("before warm scene apply");
         let attempts_limit = if is_read {
-            DDC_READ_RETRY_ATTEMPTS
+            if is_scene_gain_probe {
+                1
+            } else {
+                DDC_READ_RETRY_ATTEMPTS
+            }
         } else {
             DDC_WRITE_RETRY_ATTEMPTS
         };
@@ -3063,6 +3650,12 @@ mod imp {
             .contains("invalid ddc/ci length")
     }
 
+    fn is_transient_ddc_parse_error(message: &str) -> bool {
+        let lower = message.to_ascii_lowercase();
+        lower.contains("unable to parse ddc/ci response payload")
+            || lower.contains("invalid ddc/ci frame")
+    }
+
     fn is_unsupported_vcp_error(message: &str) -> bool {
         let lower = message.to_ascii_lowercase();
         lower.contains("unsupported vcp")
@@ -3092,6 +3685,24 @@ mod imp {
     fn ddc_readback_state() -> &'static Mutex<DdcReadbackState> {
         static DDC_READBACK_STATE: OnceLock<Mutex<DdcReadbackState>> = OnceLock::new();
         DDC_READBACK_STATE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn ddc_capability_state() -> &'static Mutex<DdcCapabilityState> {
+        static DDC_CAPABILITY_STATE: OnceLock<Mutex<DdcCapabilityState>> = OnceLock::new();
+        DDC_CAPABILITY_STATE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn ddc_capability_get(monitor_id: &str) -> Option<Option<HashMap<String, Vec<u16>>>> {
+        ddc_capability_state()
+            .lock()
+            .ok()
+            .and_then(|state| state.get(monitor_id).cloned())
+    }
+
+    fn ddc_capability_set(monitor_id: &str, value: Option<HashMap<String, Vec<u16>>>) {
+        if let Ok(mut state) = ddc_capability_state().lock() {
+            state.insert(monitor_id.to_string(), value);
+        }
     }
 
     fn ddc_mark_readback_broken(monitor_id: &str, code: &str, reason: String) {
@@ -3308,26 +3919,53 @@ mod imp {
 
         let delay = Duration::from_millis(step_delay_ms);
         let distance = current.abs_diff(target);
-        let stride = ((distance + DDC_MAX_TRANSITION_WRITES - 1) / DDC_MAX_TRANSITION_WRITES).max(1);
+        let desired_writes = ((distance + DDC_TARGET_TRANSITION_STEP_SIZE.saturating_sub(1))
+            / DDC_TARGET_TRANSITION_STEP_SIZE.max(1))
+        .max(1);
+        let writes = desired_writes.min(DDC_MAX_TRANSITION_WRITES.max(1)).min(distance);
+        let sequence = build_transition_sequence(current, target, writes.max(1));
 
-        if current < target {
-            let mut next = current.saturating_add(stride);
-            while next < target {
-                apply(next)?;
+        for (index, next) in sequence.iter().enumerate() {
+            apply(*next)?;
+            if index + 1 < sequence.len() {
                 thread::sleep(delay);
-                next = next.saturating_add(stride);
             }
-        } else {
-            let mut next = current.saturating_sub(stride);
-            while next > target {
-                apply(next)?;
-                thread::sleep(delay);
-                next = next.saturating_sub(stride);
+        }
+        Ok(())
+    }
+
+    fn build_transition_sequence(current: u16, target: u16, writes: u16) -> Vec<u16> {
+        if current == target {
+            return Vec::new();
+        }
+
+        let distance = current.abs_diff(target);
+        let writes = writes.max(1).min(distance).max(1);
+        let mut sequence = Vec::with_capacity(writes as usize);
+        let ascending = target > current;
+        let mut last = current;
+        let total = u32::from(distance);
+        let writes_u32 = u32::from(writes);
+
+        for step in 1..=writes_u32 {
+            let progressed = ((total * step) + (writes_u32 / 2)) / writes_u32;
+            let progressed = progressed.min(total) as u16;
+            let next = if ascending {
+                current.saturating_add(progressed).min(target)
+            } else {
+                current.saturating_sub(progressed).max(target)
+            };
+            if next != last {
+                sequence.push(next);
+                last = next;
             }
         }
 
-        apply(target)?;
-        Ok(())
+        if sequence.last().copied() != Some(target) {
+            sequence.push(target);
+        }
+
+        sequence
     }
 
     fn display_services_api() -> Option<&'static DisplayServicesApi> {
